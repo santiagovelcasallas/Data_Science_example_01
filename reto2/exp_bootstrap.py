@@ -2,7 +2,7 @@
 import numpy as np, pandas as pd, lightgbm as lgb
 from sklearn.metrics import roc_auc_score as auc
 import exp_lgb as E
-p = E.p; p['sem'] = p.TW.dt.to_period('W').astype(str)
+p = E.p; p['semana'] = p.TW.dt.to_period('W').astype(str)
 CORTES = ['2018-07-01', '2018-08-01', '2018-10-01', '2018-12-01', '2019-01-01', '2019-03-01']
 NB = 20
 def fit(d): return lgb.LGBMClassifier(**E.base, verbose=-1).fit(d[E.CAL], d.target)
@@ -11,7 +11,7 @@ for c in CORTES:
     a = pd.Timestamp(c); b = a + pd.DateOffset(months=5)
     tr = p[(p.TW < a) & (p.target >= 0)]; va = p[(p.TW >= a) & (p.TW < b)]
     s = {'lgb (base)': fit(tr).predict_proba(va[E.CAL])[:, 1]}
-    rng = np.random.default_rng(0); sems = tr.sem.unique(); idx = tr.groupby('sem').indices
+    rng = np.random.default_rng(0); sems = tr.semana.unique(); idx = tr.groupby('semana').indices
     bw = bf = 0
     for i in range(NB):
         pick = rng.choice(sems, len(sems), replace=True)
