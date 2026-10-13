@@ -29,7 +29,7 @@ for c in CORTES:
         rows.append(dict(corte=c[:7], modelo=f'bootstrap positivos {int(r*100)}%', auc=auc(va.target, lgbm(d, CT).predict_proba(va[CT])[:, 1])))
     # Tomek + RUS 30 %: quita negativos en enlaces Tomek y luego submuestrea negativos hasta 30 % de positivos
     X = tr[CT].assign(barrio=tr.barrio.cat.codes)
-    keep = TomekLinks(sampling_strategy='majority', n_jobs=4).fit(X, tr.target).sample_indices_
+    tl = TomekLinks(sampling_strategy='majority', n_jobs=4); tl.fit_resample(X, tr.target); keep = tl.sample_indices_
     tk = tr.iloc[keep]; ng = tk[tk.target == 0]; ps = tk[tk.target == 1]
     d = pd.concat([ps, ng.sample(min(len(ng), int(len(ps) * 0.7 / 0.3)), random_state=0)])
     rows.append(dict(corte=c[:7], modelo='tomek + RUS 30%', auc=auc(va.target, lgbm(d, CT).predict_proba(va[CT])[:, 1])))
