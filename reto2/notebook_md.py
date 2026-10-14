@@ -22,7 +22,7 @@ MD = {
 
 **Ruta del notebook (sigue el README punto por punto):** 1. Exploración y calidad · 2. Target y unión de tablas ·
 3. Variables · 4. Validación · 5. Modelado · 6. Desbalance y umbral · 7. Métricas más allá del ROC-AUC ·
-8. Resultado oficial · 9. Caso de uso y limitaciones.""",
+8. Resultado oficial y análisis de errores · 9. Caso de uso y limitaciones.""",
 
 "entorno": r"""**Entorno.** El entorno del curso (`uv sync` con el `pyproject.toml` del repositorio) trae numpy, pandas,
 scikit-learn y matplotlib. Este notebook usa además `lightgbm`, `seaborn` e `imbalanced-learn` (SMOTE). La celda
@@ -138,10 +138,24 @@ positivo que se usa para calificarlo. Las correcciones se documentan, pero no se
 
 ## 3. Ingeniería de características
 
-Las tablas no traen ninguna variable de calendario (README), así que se construyen desde `TW`. Una regla guía todas
-las decisiones: **toda variable debe poder calcularse para diciembre de 2019 con lo que se sabe hoy**. El calendario se
-conoce con años de anticipación. Los accidentes de ago-dic 2019 no se conocen, así que no se usan lags del target
-dentro del periodo a predecir.""",
+### 3.1 La regla: qué se sabe en el momento de predecir
+
+El README exige que **toda variable sea calculable en el momento de la predicción**. La predicción se hace el
+**2019-08-01**, para horas que llegan hasta el 2019-12-30, así que cada variable debe poder calcularse ese día. Revisión
+tabla por tabla:
+
+| Tabla | ¿Qué hay para una fila de ago-dic 2019? | ¿Qué NO hay? | Qué se hizo |
+|---|---|---|---|
+| `clima` | Filas para todo el periodo (Tabla 1: llega hasta 2019-12-31) | El clima de ago-dic 2019 es el **observado**: el 1 de agosto nadie conoce la lluvia del 15 de diciembre. Usarlo supone un pronóstico perfecto | **No se usa en el modelo final.** Además no aporta (1.6), así que el modelo no depende de información que no tendría |
+| `accidentes` | Nada: no tiene filas después del 2019-07-31 (Tabla 1) | El target del periodo, y cualquier lag "de la semana pasada" o "del mes pasado" dentro de él | Solo se aprende de lo anterior al corte. El único lag probado (52 semanas, 5.2) mira 364 días atrás: para dic-2019 consulta dic-2018, que ya se conoce |
+| `raw_accidentes` | Nada después del 2019-07-31 | Clase, gravedad y dirección de los accidentes futuros | Solo se usa para la exploración y para la calidad de datos |
+| Calendario (derivado de `TW`) | Todo: hora, día, mes, festivos y tendencia se conocen con años de anticipación | — | **Es la base del modelo final** (Tabla 8) |
+
+La validación respeta la misma regla: en cada corte, el modelo solo ve datos anteriores a la fecha de corte (sección 4).
+
+### 3.2 Variables creadas
+
+Las tablas no traen variables de calendario (README), así que se construyen desde `TW`.""",
 
 "s3_1": r"""**Codificación (Tabla 8):**
 
@@ -196,7 +210,7 @@ festivos. Para responderla, se hace trampa a propósito: se toma una base simple
 la semana) y se le da el **número real** de accidentes de ese día, semana o mes en el periodo de validación, **sin contar
 la propia fila**. Si ni siquiera con el nivel real se gana, un pronóstico de ese nivel tampoco puede ganar.""",
 
-"s5": "",
+"s5": r"""""",
 
 "s5_1": r"""**Lectura de la Figura 8 y la Tabla 11:**
 
@@ -222,7 +236,7 @@ Se parte del `groupby` del README y en cada paso se agrega una sola idea, evalua
 | M4 | + tendencia `t` (cambio lento de cada barrio) → **modelo final** |
 | M4 + … | Tres ideas que se probaron y se descartaron: clima, lag de 52 semanas, codificación cíclica |""",
 
-"s5_1b": "",
+"s5_1b": r"""""",
 
 "s5_2": r"""**Lectura de la Tabla 12 y la Figura 9:**
 
@@ -247,6 +261,11 @@ Se parte del `groupby` del README y en cada paso se agrega una sola idea, evalua
 **¿Por qué LightGBM?** (1) Hay 22 series con pocos positivos cada una, y un modelo global comparte información entre
 ellas. (2) Captura interacciones no lineales (un festivo apaga la hora pico, Figura 6a) sin especificarlas. (3) Maneja
 `barrio` como categórica nativa. (4) Entrena en segundos sobre medio millón de filas.
+
+**Hiperparámetros** (comentados en la celda de la sección 4): árboles pequeños (15 hojas) con al menos 400 filas por hoja,
+lo que con 1.8 % de positivos deja ~7 accidentes por hoja; tasa de aprendizaje baja (0.02) con 400 árboles; submuestreo
+de filas (80 %) y de columnas (70 %), y regularización L2. Todo apunta a no memorizar ruido en celdas con pocos
+accidentes. Se fijaron en exploraciones previas, y la búsqueda con Optuna (40 intentos) no los mejoró (5.3).
 
 ### 5.3 Lo que probamos y no funcionó
 
@@ -346,22 +365,11 @@ El modelo final (M4, `random_state = 0`) se reentrena con **todo** el entrenamie
 puede variar el ROC-AUC **por puro azar** en un periodo de 5 meses: se remuestrean 1.000 veces los días del corte
 2018-08, que es la misma temporada.""",
 
-"s9": r"""**Lectura de la Figura 13 y la Tabla 17 — RESULTADO OFICIAL: 0.7838.**
-
-1. **La validación anticipó el resultado.** El leaderboard dio **0.7838**: 0.0007 por debajo del promedio de los 6
-   cortes (0.7845) y prácticamente igual al corte de la misma temporada (0.7836). Cae en el centro del rango del 95 % por
-   azar, [0.7715, 0.7950]. La validación walk-forward fue una estimación honesta.
-2. **Frente a las referencias del README:** +0.0249 sobre la tasa histórica (0.7589) y **+0.0099 sobre el baseline del
-   profesor (0.7739)**. Eso ubica la etapa 1 en el tramo de 90–100 %.
-3. **Figura 13b, qué usa el modelo:** `barrio` (41 %) y `h` (40 %) explican más del 80 % de las divisiones, seguidos de
-   `tipo_dia` (10 %). Es la estructura barrio × hora × tipo de día que señaló la prueba de oráculos (5.1). La tendencia
-   `t`, el día del año y los festivos refinan; las banderas de temporada casi no se usan.
-
-## 9. Caso de uso y limitaciones
+"s9": r"""## 9. Caso de uso y limitaciones
 
 ### 9.1 Mapa de calor para la operación""",
 
-"s9_0": r"""**Lectura de la Figura 14:** la Secretaría puede ver de un vistazo **dónde y cuándo** concentrar agentes.
+"s9_0": r"""**Lectura de la Figura 15:** la Secretaría puede ver de un vistazo **dónde y cuándo** concentrar agentes.
 
 1. **Día laboral:** el riesgo se concentra entre las **7 h y las 18 h** en Villa Carlota, Manila, La Aguacatala y El
    Poblado, y el pico más alto es a las 16–17 h. En la madrugada el riesgo es mínimo en todos los barrios.
@@ -374,13 +382,13 @@ puede variar el ROC-AUC **por puro azar** en un periodo de 5 meses: se remuestre
 Siguiendo el caso de brigadas de las diapositivas: cada día se cubren las **4·N parejas barrio-hora de mayor
 probabilidad**. Se mide en el corte de validación 2019-03, el más reciente con etiquetas.""",
 
-"s9_1": r"""**Lectura de las Tablas 18 y 19:**
+"s9_1": r"""**Lectura de las Tablas 19 y 20:**
 
 1. **Una patrulla de 4 horas** cubre el 0.8 % de las horas-barrio y el **3.8 %** de los accidentes: **5 veces** más que
    patrullar al azar. Con **10 patrullas** (7.6 % de las horas) se cubre el **28.7 %**.
 2. El *lift* baja al agregar patrullas (de 5.0 a 3.8): las primeras toman las horas más riesgosas, y las siguientes
    horas ya son menos riesgosas.
-3. **Tabla 19, ejemplo de un turno real:** para el lunes 5 de agosto de 2019, las horas prioritarias son la tarde en
+3. **Tabla 20, ejemplo de un turno real:** para el lunes 5 de agosto de 2019, las horas prioritarias son la tarde en
    **Villa Carlota** (12–18 h, hasta 14.4 % de probabilidad), **Manila** y **La Aguacatala** (16–17 h). Un plan concreto
    sería una patrulla en Villa Carlota de 14 a 18 h y otra rotando entre Manila y La Aguacatala de 15 a 18 h.
 
@@ -406,11 +414,53 @@ probabilidad**. Se mide en el corte de validación 2019-03, el más reciente con
 | Exploración y calidad | 20 horas sin clima, bloque sin lluvia en 2018, `HORA` en dos formatos, 1 error AM/PM, 5 accidentes mal geocodificados | Tablas 1-4, Figuras 1-3 |
 | ¿Imputar clima? | **No**: el clima no separa accidentes dentro de barrio × hora y empeora el modelo | Figura 4, Tabla 5, Tabla 12 |
 | Target y unión | Rejilla completa barrio × hora; target desde la tabla oficial `accidentes`; negativos = resto de la rejilla | Tablas 6-7, Figura 5 |
+| La regla (variables calculables al predecir) | Tabla por tabla: el clima observado de ago-dic 2019 no se usa, no hay lags del target dentro del periodo y el modelo usa solo calendario | Sección 3.1 |
 | Variables | Barrio categórico + calendario (festivos de Colombia, tipo de día, temporadas) + tendencia; cíclicas comparadas | Tabla 8, Figura 6 |
 | Validación | Walk-forward, ventana expansiva, 6 cortes de 5 meses; la aleatoria infla +0.023 | Figura 7, Tablas 9-10 |
 | Modelo | **LightGBM global**: la señal está en barrio × hora × tipo de día, no en el nivel del periodo | Figuras 8-9, Tablas 11-12 |
 | Desbalance | Sin rebalanceo (ninguna técnica mejora y todas descalibran); umbral por costo (k = 25 → 0.034) | Figuras 10-11, Tablas 13-14 |
 | Métricas | Recall 0.55, precision 0.06, PR-AUC 3.3-3.8 veces el azar | Figura 12, Tabla 15 |
+| Análisis de errores | Ordena peor en barrios con pocos accidentes y en festivos; con un único umbral no anticipa la madrugada ni los domingos (12 % de los accidentes); bien calibrado | Figura 14, Tabla 18 |
 | **Resultado oficial** | **ROC-AUC = 0.7838** (validación 0.7845), por encima del baseline del profesor (0.7739) | Figura 13, Tablas 16-17 |
-| Caso de uso | Mapa de calor por barrio y hora; 1 patrulla de 4 h cubre 5 veces más accidentes que al azar | Figura 14, Tablas 18-19 |""",
+| Caso de uso | Mapa de calor por barrio y hora; 1 patrulla de 4 h cubre 5 veces más accidentes que al azar | Figura 15, Tablas 19-20 |""",
+
+"s8_2": r"""**Lectura de la Figura 13 y la Tabla 17 — RESULTADO OFICIAL: 0.7838.**
+
+1. **La validación anticipó el resultado.** El leaderboard dio **0.7838**: 0.0007 por debajo del promedio de los 6
+   cortes (0.7845) y prácticamente igual al corte de la misma temporada (0.7836). Cae en el centro del rango del 95 % por
+   azar, [0.7715, 0.7950]. La validación walk-forward fue una estimación honesta.
+2. **Frente a las referencias del README:** +0.0249 sobre la tasa histórica (0.7589) y **+0.0099 sobre el baseline del
+   profesor (0.7739)**. Eso ubica la etapa 1 en el tramo de 90–100 %.
+3. **Figura 13b, qué usa el modelo:** `barrio` (41 %) y `h` (40 %) explican más del 80 % de las divisiones, seguidos de
+   `tipo_dia` (10 %). Es la estructura barrio × hora × tipo de día que señaló la prueba de oráculos (5.1). La tendencia
+   `t`, el día del año y los festivos refinan; las banderas de temporada casi no se usan.
+
+### 8.1 Análisis de errores
+
+¿Dónde se equivoca el modelo final? Se usan sus predicciones fuera de muestra en los dos cortes sin solapamiento
+(ago-dic 2018 y mar-jul 2019, 161.568 parejas) y el umbral de 6.1. Se mira por barrio, por hora y por tipo de día, y si
+las probabilidades están calibradas.""",
+
+"s8_3": r"""**Lectura de la Figura 14 y la Tabla 18:**
+
+1. **Por barrio (Figura 14a):** dentro de cada barrio el ROC-AUC va de **0.636** (El Castillo) a **0.763** (Astorga).
+   Todos quedan por debajo del global (0.78), y es lo esperable: dentro de un barrio ya no cuenta la diferencia de nivel
+   entre barrios, solo el orden de las horas. Los tres peores (El Castillo, Altos del Poblado, El Diamante 2) tienen
+   pocos accidentes. Aun así, el tamaño no lo explica todo (correlación de Spearman 0.17): Lalinde y Astorga, también
+   pequeños, están entre los mejores.
+2. **Qué se le escapa (Figura 14b y Tabla 18):** con un único umbral, las alertas se concentran en el **día laboral**
+   (recall 62.5 %) y en la **tarde** (67.8 %). En la **madrugada** (0-5 h) no anticipa ningún accidente (recall 0 %), y
+   tampoco en **domingos** (0.5 %) ni **festivos** (0 %). Son 151, 190 y 54 accidentes; juntos, sin contar dos veces los de madrugada en domingo, suman 357: el 12 % del total. No es un
+   fallo de orden, porque dentro de esos grupos el ROC-AUC sigue entre 0.68 y 0.76. Es que su probabilidad nunca llega
+   al umbral: un domingo a las 3 a. m. es, de verdad, de bajo riesgo.
+3. **Peor segmento:** los festivos (ROC-AUC 0.681), con solo 54 accidentes en los dos cortes. Hay pocos festivos para
+   aprender su patrón.
+4. **Calibración (Figura 14c):** los 10 deciles caen sobre la diagonal. La probabilidad predicha y la tasa real
+   coinciden también por segmento (madrugada 0.30 % vs 0.37 %; tarde 3.10 % vs 3.32 %; festivo 0.73 % vs 0.68 %). Solo
+   hay una leve subestimación en la tarde y en el decil más alto. Por eso el umbral por costo de 6.1 funciona.
+
+**Implicación operativa:** si la Secretaría quiere presencia también de noche y los fines de semana, conviene un
+**umbral o una cuota por turno** (las horas más riesgosas *dentro* de cada franja), en lugar de un único umbral global.
+El orden dentro de cada grupo es bueno: ROC-AUC de 0.73 a 0.76 por franja.""",
+
 }
