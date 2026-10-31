@@ -1,0 +1,46 @@
+# Usage:
+#   docker compose build
+#   docker compose run --rm smoke                 # CPU smoke test (~minutes)
+#   docker compose run --rm pipeline --phase1-only
+#   docker compose up pipeline                    # full GPU loop
+#   docker compose --profile monitor up tensorboard
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  image: alumina-pipeline:latest
+  environment:
+    - MP_API_KEY=${MP_API_KEY:-}      # read from ./.env by compose interpolation
+    - ALUMINA_ROOT=/workspace
+  volumes:
+    - ./configs:/workspace/configs
+    - ./src:/workspace/src            # live code edits without rebuild
+    - ./data:/workspace/data          # Phase 1 cache + slab
+    - ./models:/workspace/models      # Chemprop checkpoints, BO state
+    - ./priors:/workspace/priors      # REINVENT priors (download separately)
+    - ./runs:/workspace/runs          # outputs
+  shm_size: "8gb"
+
+services:
+  pipeline:
+    <<: *common
+    command: ["--config", "configs/pipeline.yaml"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  smoke:
+    <<: *common
+    command: ["--config", "configs/pipeline.yaml", "--smoke"]
+
+  tensorboard:
+    <<: *common
+    profiles: ["monitor"]
+    entrypoint: ["tensorboard"]
+    command: ["--logdir", "/workspace/runs", "--host", "0.0.0.0", "--port", "6006"]
+    ports:
+      - "6006:6006"

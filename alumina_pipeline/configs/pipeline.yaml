@@ -1,0 +1,86 @@
+# =============================================================================
+# Alumina Solvent Discovery Pipeline — run configuration
+# Every backend has a "real" option and a lightweight fallback so the loop can
+# be smoke-tested end-to-end on a CPU before spending GPU hours.
+# =============================================================================
+
+run:
+  name: alumina_v0
+  output_dir: runs          # relative to the project root (mounted volume)
+  seed: 42
+  device: auto              # auto | cuda | cpu
+
+# -----------------------------------------------------------------------------
+# Phase 1 — static Al2O3 target (corundum, alpha-Al2O3)
+# -----------------------------------------------------------------------------
+phase1:
+  structure_source: materials_project   # materials_project | builtin
+  mp_material_id: mp-1143               # corundum alpha-Al2O3, R-3c (#167)
+  calculator: mace                      # mace | chgnet | emt (emt = wiring test only, NOT physical)
+  mace_model: medium                    # mace_mp foundation model size: small | medium | large
+  miller_index: [0, 0, 1]               # (0001) basal plane in hexagonal setting
+  min_slab_size: 10.0                   # Angstrom
+  min_vacuum_size: 15.0                 # Angstrom
+  supercell: [2, 2, 1]                  # lateral repeat so the vacancy does not self-interact
+  relax_bulk: true
+  relax_slab: true
+  fmax: 0.05                            # eV/Angstrom
+  max_steps: 300
+  cache_file: data/phase1_target.json   # Phase 1 is static: computed once, then reused
+
+# -----------------------------------------------------------------------------
+# Phase 2 — de novo solvent generator
+# -----------------------------------------------------------------------------
+phase2:
+  backend: enumerator                  # reinvent | enumerator (fallback, no GPU / prior needed)
+  solvent_classes: [ionic_liquid, deep_eutectic]
+  pool_size: 256                       # candidates handed to the optimizer per round
+  reinvent:
+    executable: /opt/reinvent-venv/bin/reinvent
+    prior_file: priors/reinvent.prior  # download from Zenodo, see README
+    batch_size: 64
+    steps_per_round: 50                # RL steps per outer BO round
+    sigma: 128
+    learning_rate: 0.0001
+  constraints:
+    min_boiling_point_C: 25.0          # hard penalty below this
+    max_alkyl_chain: 8                 # IL toxicity rises sharply with chain length
+    max_heavy_atoms: 40
+    toxicity_penalty_weight: 1.0
+
+# -----------------------------------------------------------------------------
+# Phase 3 — evaluator (the "clash")
+# -----------------------------------------------------------------------------
+phase3:
+  backend: surrogate                   # chemprop | surrogate (heuristic, wiring test only)
+  chemprop:
+    executable: chemprop
+    model_path: models/solvation_dG.ckpt   # 2-component model: (solvent, solute) -> dG_solv [kcal/mol]
+    output_units: kcal/mol
+  # Species that leaves the lattice when an O is pulled out. It is the solute
+  # whose solvation free energy in the candidate solvent is predicted.
+  probe_solutes:
+    hydroxide: "[OH-]"
+    water: "O"
+    aluminate: "[O-][Al](=O)"           # crude AlO2- proxy; replace with your trained species
+  probe_weights: {hydroxide: 0.5, water: 0.2, aluminate: 0.3}
+  # Shift applied to dG_extract; calibrate on a reference solvent with known Al2O3 solubility.
+  calibration_offset_kJ_mol: 0.0
+  explicit_interface:
+    enabled: false                     # MACE adsorption check on the top-k (slow, GPU recommended)
+    top_k: 3
+    fmax: 0.1
+    max_steps: 150
+
+# -----------------------------------------------------------------------------
+# Phase 4 — Bayesian optimisation / active learning (BoTorch)
+# -----------------------------------------------------------------------------
+phase4:
+  n_rounds: 10
+  batch_size: 8                        # q: candidates sent to Phase 3 per round
+  n_initial: 16                        # random initial design before the GP is trusted
+  fingerprint_bits: 2048
+  fingerprint_radius: 2
+  acquisition: qLogEI                  # qLogEI | qUCB
+  ucb_beta: 2.0
+  surrogate_state: models/bo_state.pt  # read by the REINVENT ExternalProcess scorer

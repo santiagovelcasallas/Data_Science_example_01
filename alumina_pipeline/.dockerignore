@@ -1,0 +1,7 @@
+runs/
+data/
+models/
+priors/
+.env
+**/__pycache__
+*.egg-info
