@@ -80,7 +80,8 @@ def load_bulk(cfg: dict) -> tuple[Atoms, str]:
         spacegroup=167,
         cellpar=[4.7602, 4.7602, 12.9933, 90, 90, 120],
     )
-    assert atoms.get_chemical_formula(mode="reduce") in ("Al2O3", "O3Al2"), atoms.get_chemical_formula()
+    syms = atoms.get_chemical_symbols()
+    assert (syms.count("Al"), syms.count("O")) == (12, 18), atoms.get_chemical_formula()
     return atoms, "builtin:corundum_R-3c"
 
 
@@ -142,7 +143,11 @@ def build_slabs(bulk: Atoms, cfg: dict) -> list[Atoms]:
     else:
         log.warning("No symmetric stoichiometric slab: gamma will average two different faces.")
     log.info("Generated %d candidate terminations for %s", len(slabs), cfg["miller_index"])
-    return [AseAtomsAdaptor.get_atoms(s) for s in slabs]
+    out = []
+    for s in slabs:  # drop pymatgen site_properties: plain Atoms only
+        a = AseAtomsAdaptor.get_atoms(s)
+        out.append(Atoms(a.numbers, positions=a.positions, cell=a.cell, pbc=True))
+    return out
 
 
 def _fix_lower_half(atoms: Atoms) -> None:
@@ -219,8 +224,7 @@ def compute_target(cfg: dict, device: str = "auto", force: bool = False) -> Targ
 
     slab_file = resolve("data/al2o3_slab.extxyz")
     slab_file.parent.mkdir(parents=True, exist_ok=True)
-    slab.set_constraint()
-    write(slab_file, slab)
+    write(slab_file, Atoms(slab.numbers, positions=slab.positions, cell=slab.cell, pbc=True))
 
     res = TargetResult(
         source=source,
