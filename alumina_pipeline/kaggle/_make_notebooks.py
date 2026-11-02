@@ -57,16 +57,43 @@ if not CODE.exists():
     r = subprocess.run(["git", "clone", "-q", "--depth", "1", "--branch", BRANCH, url, str(CODE)],
                        capture_output=True, text=True)
     if r.returncode != 0:
-        raise RuntimeError("git clone fallo: " + r.stderr[-300:])
+        raise RuntimeError("git clone fallo: " + r.stderr[-300:].replace(token or "\0", "***"))
 print("Codigo en", PKG)
+
+import re, sys
+NOISE = re.compile(r"warn|it/s|Tip:|^\s*$|cuequivariance|torch\.load", re.I)
+
+def sh(cmd, log, show=lambda line: not NOISE.search(line)):
+    """Ejecuta un comando mostrando su progreso. Si falla, DETIENE el notebook
+    mostrando las ultimas lineas del error (nada de fallos silenciosos)."""
+    cmd = [str(c) for c in cmd]
+    print("$", " ".join(cmd), flush=True)
+    tail = []
+    with open(log, "w") as fh, subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                                text=True, bufsize=1) as p:
+        for line in p.stdout:
+            fh.write(line)
+            tail = (tail + [line])[-60:]
+            if show(line):
+                print(line, end="", flush=True)
+    if p.returncode != 0:
+        print("\n========== ERROR: ultimas lineas ==========\n" + "".join(tail))
+        raise RuntimeError(f"El comando fallo (codigo {p.returncode}). Log completo: {log}")
 ''')
 
 INSTALL = ("code", r'''
 # ==== Instalacion (~3-6 min). Se fija la version de torch de Kaggle para no romper CUDA ====
-!pip freeze | grep -E "^torch==" > /tmp/constraints.txt; cat /tmp/constraints.txt
-!pip install -q -c /tmp/constraints.txt -r {PKG}/kaggle/requirements-kaggle.txt
-!pip install -q --no-deps -e {PKG}
-!python -c "import torch,rdkit,ase,botorch,alumina_pipeline as a; print('torch',torch.__version__,'| GPU:',torch.cuda.is_available())"
+torch_pin = [l for l in subprocess.run([sys.executable, "-m", "pip", "freeze"], capture_output=True,
+                                       text=True).stdout.splitlines() if l.startswith("torch==")]
+Path("/tmp/constraints.txt").write_text("\n".join(torch_pin) + "\n")
+print("torch fijado:", torch_pin)
+sh([sys.executable, "-m", "pip", "install", "-q", "-c", "/tmp/constraints.txt",
+    "-r", PKG / "kaggle/requirements-kaggle.txt"], "/tmp/pip.log")
+sh([sys.executable, "-m", "pip", "install", "-q", "--no-deps", "-e", PKG], "/tmp/pip_pkg.log")
+sh([sys.executable, "-c", "import torch,rdkit,ase,botorch,chemprop,alumina_pipeline; "
+    "print('torch', torch.__version__, '| chemprop', chemprop.__version__, '| GPU:', torch.cuda.is_available())"],
+   "/tmp/check.log")
+CHEMPROP = shutil.which("chemprop") or str(Path(sys.executable).parent / "chemprop")
 ''')
 
 
@@ -103,7 +130,8 @@ yaml.safe_dump({
 }, open(ROOT / "overlay_phase1.yaml", "w"))
 '''),
     ("code", r'''
-!python -m alumina_pipeline.orchestrator --config {PKG}/configs/pipeline.yaml --overlay {ROOT}/overlay_phase1.yaml --phase1-only --force-phase1 2>&1 | grep -v Warning
+sh([sys.executable, "-m", "alumina_pipeline.orchestrator", "--config", PKG / "configs/pipeline.yaml",
+    "--overlay", ROOT / "overlay_phase1.yaml", "--phase1-only", "--force-phase1"], ROOT / "phase1.log")
 '''),
     ("code", r'''
 t = json.loads((ROOT / "data/phase1_target.json").read_text())
@@ -132,107 +160,156 @@ nb("02_train_chemprop.ipynb", [
 
 Modelo de **2 componentes**: `(solvente, soluto) -> DG_solv [kcal/mol]`. Se entrena una vez; el nb 03 lo usa en cada ronda.
 
-**Elige la fuente de datos abajo (`DATA_SOURCE`):**
-- `"freesolv"` (por defecto, cero setup): baja FreeSolv y arma un CSV de arranque. **Solo agua como solvente** -> sirve para verificar que todo el pipeline corre, pero el modelo NO aprende a distinguir solventes. Dataset de cableado, no de descubrimiento.
-- `"zenodo"` (recomendado para ciencia real): baja **CombiSolv-Exp** (Vermeire & Green 2021, ~10k pares, muchos solventes) desde Zenodo. Kaggle tiene internet abierto, asi que se descarga aqui mismo.
-- `"upload"`: tu propio CSV subido como Kaggle Dataset (Add Input). Lo mejor si tienes datos de ILs/DES.
+**Fuente de datos (`DATA_SOURCE`):**
+- `"zenodo"` (por defecto): baja la coleccion **SolProp** (Vermeire & Green; incluye CombiSolv-Exp, muchos solventes) desde Zenodo, ~270 MB, y elige el CSV de energia libre de solvatacion **mirando sus columnas**.
+- `"upload"`: tu propio CSV (Add Input). Lo mejor si consigues datos de ILs/DES.
+- `"freesolv"`: solo agua. Unicamente para depurar; no sirve para elegir solventes.
 
-Casi ningun dataset publico tiene iones metal-oxo ni muchos ILs/DES; la celda de cobertura lo cuantifica para que sepas cuanto fiarte.
+Antes del entrenamiento largo hay un **pre-chequeo corto** (~1 min): si algo esta mal, el notebook se detiene ahi mostrando el error real.
 
-**Settings:** GPU · Internet On · (si `upload`) Add Input -> tu dataset. Save & Run All (Commit).
+**Settings:** GPU · Internet On · Save & Run All (Commit). Tiempo total aprox.: 25-45 min.
 '''),
     SETUP, INSTALL,
     ("code", r'''
-DATA_SOURCE = "freesolv"    # "freesolv" | "zenodo" | "upload"
+DATA_SOURCE = "zenodo"      # "zenodo" | "upload" | "freesolv"
 EPOCHS, ENSEMBLE = 100, 3
 
-# Solo para "upload": ajusta a los nombres de columna de TU csv
+# Solo para "upload": nombres de columna de TU csv
 CSV_PATTERN = "*.csv"
 SOLVENT_COL, SOLUTE_COL, TARGET_COL, TARGET_UNITS = "solvent", "solute", "dG", "kcal/mol"
 
-# Solo para "zenodo": record de la coleccion SolProp (contiene CombiSolv-Exp)
-ZENODO_RECORD = "5970538"
+# Solo para "zenodo"
+ZENODO_RECORD = "5970538"   # coleccion SolProp v1.2
+ZENODO_CSV    = None        # None = automatico. Para forzar uno: parte de su nombre, p.ej. "CombiSolv"
 '''),
     ("code", r'''
-import re, io, zipfile, urllib.request, pandas as pd
+import io, zipfile, urllib.request, pandas as pd
 from rdkit import Chem, RDLogger
 RDLogger.DisableLog("rdApp.*")
 
 def load_freesolv():
     url = "https://raw.githubusercontent.com/MobleyLab/FreeSolv/master/database.txt"
-    txt = urllib.request.urlopen(url, timeout=60).read().decode()
     rows = []
-    for ln in txt.splitlines():
-        if ln.startswith("#") or not ln.strip(): continue
+    for ln in urllib.request.urlopen(url, timeout=60).read().decode().splitlines():
         p = [x.strip() for x in ln.split(";")]
-        if len(p) >= 5: rows.append({"solvent": "O", "solute": p[1], "dG": float(p[3])})
-    return pd.DataFrame(rows)   # agua (O) como unico solvente
+        if not ln.startswith("#") and len(p) >= 5:
+            rows.append({"solvent": "O", "solute": p[1], "dG": float(p[3])})
+    return pd.DataFrame(rows)
+
+BAD_TARGET = ("std", "err", "unc", "count", "log", "hsolv", "enthalp")
+
+def find_cols(columns):
+    """(col_solvente, col_soluto, col_dG) o None.
+    Prefiere columnas SMILES (no nombres ni InChI) y el PROMEDIO de dG (no su desviacion)."""
+    low = [(c, c.lower().replace(" ", "")) for c in columns]
+    sv = next((c for c, l in low if "solvent" in l and "smiles" in l), None) \
+         or next((c for c, l in low if l == "solvent"), None)
+    su = next((c for c, l in low if "solute" in l and "smiles" in l), None) \
+         or next((c for c, l in low if l == "solute"), None)
+    g = [c for c, l in low if ("gsolv" in l or l in ("dg", "deltag")) and not any(b in l for b in BAD_TARGET)]
+    g.sort(key=lambda c: ("avg" not in c.lower() and "mean" not in c.lower(), len(c)))
+    return (sv, su, g[0]) if sv and su and g else None
 
 def load_zenodo(record):
-    api = f"https://zenodo.org/api/records/{record}"
-    files = json.load(urllib.request.urlopen(api, timeout=60))["files"]
-    print("Archivos en el record:")
-    for f in files: print(f"  {f['size']:>10} {f['key']}")
-    # busca un archivo cuyo nombre sugiera CombiSolv-Exp
-    pick = next((f for f in files if re.search(r"combisolv.*exp", f["key"], re.I)), None) \
-        or next((f for f in files if f["key"].lower().endswith((".csv", ".zip"))), None)
-    if pick is None: raise RuntimeError("No encontre un CSV/zip; revisa la lista de arriba")
-    print("Descargando:", pick["key"])
-    raw = urllib.request.urlopen(pick["links"]["self"], timeout=300).read()
-    if pick["key"].lower().endswith(".zip"):
-        z = zipfile.ZipFile(io.BytesIO(raw))
-        name = next(n for n in z.namelist() if n.lower().endswith(".csv"))
-        print("  CSV dentro del zip:", name); raw = z.read(name)
-    d = pd.read_csv(io.BytesIO(raw))
-    print("Columnas:", list(d.columns))   # revisa y renombra si hiciera falta
-    cols = {c.lower(): c for c in d.columns}
-    sv = cols.get("solvent") or cols.get("solvent_smiles")
-    su = cols.get("solute") or cols.get("solute_smiles")
-    tg = cols.get("dgsolv") or cols.get("dg") or cols.get("dgsolv_kcal/mol") or cols.get("target")
-    return d.rename(columns={sv: "solvent", su: "solute", tg: "dG"})[["solvent", "solute", "dG"]]
+    cache = ROOT / "data" / f"zenodo_{record}.zip"
+    if not cache.exists():
+        files = json.load(urllib.request.urlopen(f"https://zenodo.org/api/records/{record}", timeout=60))["files"]
+        f = next(f for f in files if f["key"].lower().endswith((".zip", ".csv")))
+        print("Descargando", f["key"], f"({f['size']/1e6:.0f} MB)...", flush=True)
+        urllib.request.urlretrieve(f["links"]["self"], cache)
+    z = zipfile.ZipFile(cache)
+    usable = []
+    print("CSVs dentro del zip:")
+    for n in [n for n in z.namelist() if n.lower().endswith(".csv")]:
+        try:
+            cols = list(pd.read_csv(z.open(n), nrows=0).columns)
+        except Exception as e:
+            print(f"  [ilegible] {n}: {e}"); continue
+        hit = find_cols(cols)
+        print(f"  {'[USABLE]' if hit else '[  no  ]'} {n}  {cols}")
+        if hit and (ZENODO_CSV is None or ZENODO_CSV.lower() in n.lower()):
+            usable.append((n, hit))
+    if not usable:
+        raise RuntimeError("Ningun CSV tiene (solvente SMILES, soluto SMILES, dGsolv). "
+                           "Revisa la lista de arriba y fija ZENODO_CSV.")
+    # preferir datos experimentales ('exp') sobre calculados ('qm')
+    usable.sort(key=lambda u: ("exp" not in u[0].lower(), "qm" in u[0].lower()))
+    name, (sv, su, tg) = usable[0]
+    print(f"\nELEGIDO: {name}\n  solvente <- {sv!r} | soluto <- {su!r} | dG <- {tg!r}")
+    d = pd.read_csv(z.open(name), usecols=[sv, su, tg])[[sv, su, tg]]
+    d.columns = ["solvent", "solute", "dG"]          # sin renombrar: imposible duplicar columnas
+    if "kj" in tg.lower():
+        d["dG"] = pd.to_numeric(d["dG"], errors="coerce") / 4.184
+    return d
 
 def load_upload():
     hits = ''' + inputs("{CSV_PATTERN}").replace("{CSV_PATTERN}", '" + CSV_PATTERN + "') + r'''
     if not hits: raise FileNotFoundError("Sin CSV: Add Input -> tu dataset")
-    d = pd.read_csv(hits[0]).rename(columns={SOLVENT_COL: "solvent", SOLUTE_COL: "solute", TARGET_COL: "dG"})
-    if TARGET_UNITS == "kJ/mol": d["dG"] = d["dG"] / 4.184
-    return d[["solvent", "solute", "dG"]]
+    d = pd.read_csv(hits[0], usecols=[SOLVENT_COL, SOLUTE_COL, TARGET_COL])[[SOLVENT_COL, SOLUTE_COL, TARGET_COL]]
+    d.columns = ["solvent", "solute", "dG"]
+    if TARGET_UNITS == "kJ/mol": d["dG"] = pd.to_numeric(d["dG"], errors="coerce") / 4.184
+    return d
 
-df = {"freesolv": load_freesolv, "zenodo": lambda: load_zenodo(ZENODO_RECORD), "upload": load_upload}[DATA_SOURCE]()
+df = {"zenodo": lambda: load_zenodo(ZENODO_RECORD), "upload": load_upload, "freesolv": load_freesolv}[DATA_SOURCE]()
 print(f"\nFuente '{DATA_SOURCE}': {len(df)} filas crudas")
+display(df.head())
 '''),
     ("code", r'''
-# Limpieza + cobertura del dominio
+# ==== Limpieza + cobertura del dominio ====
 def canon(s):
-    m = Chem.MolFromSmiles(str(s));  return Chem.MolToSmiles(m) if m else None
+    m = Chem.MolFromSmiles(str(s))
+    return Chem.MolToSmiles(m) if m else None
+
 n0 = len(df)
-df = df.dropna(subset=["solvent", "solute", "dG"]).copy()
 df["dG"] = pd.to_numeric(df["dG"], errors="coerce")
 df["solvent"], df["solute"] = df["solvent"].map(canon), df["solute"].map(canon)
-df = df.dropna()
+df = df.dropna().reset_index(drop=True)
 print(f"Filas validas: {len(df)}/{n0} | solventes unicos: {df.solvent.nunique()} | solutos unicos: {df.solute.nunique()}")
+print(f"dG [kcal/mol]: min {df.dG.min():.1f} | mediana {df.dG.median():.1f} | max {df.dG.max():.1f}")
+if len(df) < 0.5 * n0:
+    raise RuntimeError("Mas de la mitad de las filas no son SMILES validos: columnas equivocadas.")
 
-ionic = df.solvent.map(lambda s: "." in s or "+" in s).mean()
-print(f"Cobertura -> solventes ionicos/mezclas: {ionic:.1%}")
+ionic = df.solvent.map(lambda s: "." in s or "+" in s or "-" in s).mean()
+print(f"COBERTURA -> solventes ionicos/mezclas: {ionic:.1%} de las filas")
 if df.solvent.nunique() == 1:
-    print("[!] Un solo solvente: el modelo NO podra distinguir solventes (dataset de cableado).")
+    print("[!] Un solo solvente: el modelo NO puede distinguir solventes.")
 elif ionic < 0.01:
     print("[!] Casi no hay solventes ionicos: las predicciones para ILs/DES seran extrapolaciones.")
-train_csv = ROOT / "data/solvation_train.csv"; df.to_csv(train_csv, index=False)
+
+train_csv = ROOT / "data/solvation_train.csv"
+df.to_csv(train_csv, index=False)
 '''),
     ("code", r'''
-!chemprop train --data-path {train_csv} --smiles-columns solvent solute --target-columns dG \
-  --task-type regression --epochs {EPOCHS} --ensemble-size {ENSEMBLE} \
-  --output-dir {ROOT}/models/chemprop_solvation 2>&1 | grep -viE "warning|it/s" | tail -n 40
+# ==== Pre-chequeo: 3 epocas (Chemprop exige > 2 de calentamiento) con 300 filas. Falla AQUI en ~1 min si algo esta mal ====
+pre_csv, pre_out = ROOT / "data/preflight.csv", Path("/tmp/preflight_model")
+df.sample(min(300, len(df)), random_state=0).to_csv(pre_csv, index=False)
+shutil.rmtree(pre_out, ignore_errors=True)
+sh([CHEMPROP, "train", "--data-path", pre_csv, "--smiles-columns", "solvent", "solute",
+    "--target-columns", "dG", "--task-type", "regression", "--epochs", 3, "--output-dir", pre_out],
+   "/tmp/preflight.log", show=lambda l: "Error" in l or "Traceback" in l)
+print("Pre-chequeo OK: datos y Chemprop funcionan.")
 '''),
     ("code", r'''
-# Chequeo de cordura: agua en agua ~ -6.3 kcal/mol
-test = pd.DataFrame({"solvent":["O","CO","O"], "solute":["O","O","[OH-]"],
-                     "nota":["agua/agua ~-6.3","agua/metanol","OH-/agua"]})
-test[["solvent","solute"]].to_csv("/tmp/test.csv", index=False)
-!chemprop predict --test-path /tmp/test.csv --preds-path /tmp/tp.csv --model-paths {ROOT}/models/chemprop_solvation --smiles-columns solvent solute 2>&1 | tail -n 1
-tp = pd.read_csv("/tmp/tp.csv")
-test["pred_kcal_mol"] = tp[[c for c in tp.columns if c not in ("solvent","solute")][0]].values
+# ==== Entrenamiento completo (en GPU ~15-30 min con ~10k filas) ====
+MODEL_DIR = ROOT / "models/chemprop_solvation"
+shutil.rmtree(MODEL_DIR, ignore_errors=True)
+sh([CHEMPROP, "train", "--data-path", train_csv, "--smiles-columns", "solvent", "solute",
+    "--target-columns", "dG", "--task-type", "regression", "--epochs", EPOCHS,
+    "--ensemble-size", ENSEMBLE, "--metrics", "rmse", "mae", "r2", "--output-dir", MODEL_DIR],
+   ROOT / "chemprop_train.log", show=lambda l: "INFO" in l or "Error" in l)
+print("\nMETRICAS DE TEST (anotalas):")
+print("".join(l for l in open(ROOT / "chemprop_train.log") if "chemprop.cli.train - test/" in l))
+'''),
+    ("code", r'''
+# ==== Chequeo de cordura con valores conocidos ====
+test = pd.DataFrame({"solvent": ["O", "CO", "O"], "solute": ["O", "O", "[OH-]"],
+                     "referencia": ["agua en agua: exp. ~ -6.3", "agua en metanol",
+                                    "OH- en agua: exp. ~ -100 (casi no hay iones en los datos)"]})
+test[["solvent", "solute"]].to_csv("/tmp/test.csv", index=False)
+sh([CHEMPROP, "predict", "--test-path", "/tmp/test.csv", "--preds-path", "/tmp/tp.csv",
+    "--model-paths", MODEL_DIR, "--smiles-columns", "solvent", "solute"],
+   "/tmp/predict.log", show=lambda l: "Error" in l or "Traceback" in l)
+test["pred_kcal_mol"] = pd.read_csv("/tmp/tp.csv")["dG"].round(2).values
 test
 '''),
     ("markdown", r'''
@@ -331,7 +408,8 @@ resume_flag = f"--resume {RESUME_DIR}" if RESUME_DIR else ""
 print(resume_flag or "Corrida nueva")
 '''),
     ("code", r'''
-!python -m alumina_pipeline.orchestrator --config {PKG}/configs/pipeline.yaml --overlay {ROOT}/overlay_loop.yaml --rounds {N_ROUNDS} {resume_flag} 2>&1 | grep -v Warning | tee -a {ROOT}/loop.log
+sh([sys.executable, "-m", "alumina_pipeline.orchestrator", "--config", PKG / "configs/pipeline.yaml",
+    "--overlay", ROOT / "overlay_loop.yaml", "--rounds", N_ROUNDS, *resume_flag.split()], ROOT / "loop.log")
 '''),
     ("code", r'''
 import pandas as pd
