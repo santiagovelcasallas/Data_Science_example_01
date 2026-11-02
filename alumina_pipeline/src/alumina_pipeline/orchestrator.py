@@ -11,12 +11,15 @@ Usage:
     python -m alumina_pipeline.orchestrator --config configs/pipeline.yaml
     python -m alumina_pipeline.orchestrator --config configs/pipeline.yaml --smoke
     python -m alumina_pipeline.orchestrator --config configs/pipeline.yaml --phase1-only
+    python -m alumina_pipeline.orchestrator --config configs/pipeline.yaml --overlay kaggle.yaml \
+        --resume runs/alumina_v0_20261101-120000 --rounds 20
 """
 
 from __future__ import annotations
 
 import argparse
 import copy
+import json
 import logging
 import time
 from collections import Counter
@@ -69,10 +72,25 @@ def summarize_round(results: list[dict], round_idx: int) -> dict:
     return s
 
 
-def run(cfg: dict, force_phase1: bool = False, phase1_only: bool = False) -> None:
+def deep_update(base: dict, over: dict) -> dict:
+    for k, v in over.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            deep_update(base[k], v)
+        else:
+            base[k] = v
+    return base
+
+
+def run(cfg: dict, force_phase1: bool = False, phase1_only: bool = False,
+        resume: str | None = None) -> Path:
     seed_everything(cfg["run"]["seed"])
     device = pick_device(cfg["run"]["device"])
-    run_dir = resolve(cfg["run"]["output_dir"]) / f"{cfg['run']['name']}_{time.strftime('%Y%m%d-%H%M%S')}"
+    if resume:
+        run_dir = resolve(resume)
+        if not run_dir.is_dir():
+            raise FileNotFoundError(f"--resume: run directory not found: {run_dir}")
+    else:
+        run_dir = resolve(cfg["run"]["output_dir"]) / f"{cfg['run']['name']}_{time.strftime('%Y%m%d-%H%M%S')}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     # The REINVENT scorer subprocess reads this exact config (incl. GP state path).
@@ -87,7 +105,7 @@ def run(cfg: dict, force_phase1: bool = False, phase1_only: bool = False) -> Non
     log.info("Target: gamma=%.3f J/m^2, E_break(O)=%.1f kJ/mol [%s]",
              target.surface_energy, target.e_break_o_kj_mol, target.calculator)
     if phase1_only:
-        return
+        return run_dir
 
     gen = SolventGenerator(cfg["phase2"], run_dir, eff_cfg, seed=cfg["run"]["seed"], device=device)
     evaluator = SolvationEvaluator(cfg["phase3"], cfg["phase2"]["constraints"], target, run_dir,
@@ -97,8 +115,25 @@ def run(cfg: dict, force_phase1: bool = False, phase1_only: bool = False) -> Non
     history: list[dict] = []
     summaries: list[dict] = []
     evaluated: set[str] = set()
+    start_round = 0
 
-    for r in range(cfg["phase4"]["n_rounds"]):
+    # ---------------- Resume (e.g. after a Kaggle session timeout) ----------------
+    if resume and (run_dir / "history.csv").exists():
+        hist = pd.read_csv(run_dir / "history.csv")
+        history = hist.to_dict("records")
+        evaluated = set(hist["smiles"])
+        start_round = int(hist["round"].max()) + 1
+        if (run_dir / "rounds.json").exists():
+            summaries = json.loads((run_dir / "rounds.json").read_text())
+        bo.observe(history)
+        bo.save_state(Path(cfg["phase4"]["surrogate_state"]))
+        chkpts = sorted((run_dir / "reinvent").glob("agent_round*.chkpt"))
+        if chkpts:
+            gen.agent_file = chkpts[-1]
+        log.info("Resumed %s: %d evaluations, continuing at round %d (agent: %s)",
+                 run_dir.name, len(history), start_round, gen.agent_file)
+
+    for r in range(start_round, cfg["phase4"]["n_rounds"]):
         pool = gen.propose(r, exclude=evaluated)                                   # Phase 2
         if not pool:
             log.warning("Generator exhausted; stopping.")
@@ -115,11 +150,15 @@ def run(cfg: dict, force_phase1: bool = False, phase1_only: bool = False) -> Non
         pd.DataFrame(history).to_csv(run_dir / "history.csv", index=False)
         dump_json(summaries, run_dir / "rounds.json")
 
+    if not history:
+        log.warning("No evaluations were made (n_rounds already reached?).")
+        return run_dir
     df = pd.DataFrame(history).sort_values("objective", ascending=False)
     top = df.head(10)[["smiles", "kind", "partner", "dG_extract_kJ_mol", "success", "failure_reason"]]
     top.to_csv(run_dir / "top_candidates.csv", index=False)
     log.info("Done. %d evaluated, %d successes. Top candidates:\n%s",
              len(df), int(df["success"].sum()), top.to_string(index=False))
+    return run_dir
 
 
 def main() -> None:
@@ -128,14 +167,23 @@ def main() -> None:
     ap.add_argument("--smoke", action="store_true", help="CPU smoke test with fallback backends")
     ap.add_argument("--phase1-only", action="store_true")
     ap.add_argument("--force-phase1", action="store_true", help="recompute the cached target")
+    ap.add_argument("--overlay", action="append", default=[],
+                    help="YAML file deep-merged over --config (repeatable), e.g. Kaggle settings")
+    ap.add_argument("--resume", help="existing run directory to continue")
+    ap.add_argument("--rounds", type=int, help="override phase4.n_rounds (total, incl. resumed)")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args()
 
     setup_logging(args.log_level)
     cfg = load_config(resolve(args.config))
+    for ov in args.overlay:
+        with open(resolve(ov)) as fh:
+            deep_update(cfg, yaml.safe_load(fh) or {})
     if args.smoke:
         cfg = apply_smoke(cfg)
-    run(cfg, force_phase1=args.force_phase1, phase1_only=args.phase1_only)
+    if args.rounds is not None:
+        cfg["phase4"]["n_rounds"] = args.rounds
+    run(cfg, force_phase1=args.force_phase1, phase1_only=args.phase1_only, resume=args.resume)
 
 
 if __name__ == "__main__":

@@ -176,7 +176,8 @@ class SolvationEvaluator:
 
         ec = self.cfg["explicit_interface"]
         calc = get_calculator(self.calculator_cfg.get("calculator", "mace"), self.device,
-                              self.calculator_cfg.get("mace_model", "medium"))
+                              self.calculator_cfg.get("mace_model", "medium"),
+                              self.calculator_cfg.get("mace_dtype", "float64"))
         slab = read(self.target.slab_file)
         o_idx = self.target.removed_o_index
         site = slab.positions[o_idx]

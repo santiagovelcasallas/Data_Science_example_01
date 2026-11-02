@@ -18,6 +18,7 @@ phase1:
   mp_material_id: mp-1143               # corundum alpha-Al2O3, R-3c (#167)
   calculator: mace                      # mace | chgnet | emt (emt = wiring test only, NOT physical)
   mace_model: medium                    # mace_mp foundation model size: small | medium | large
+  mace_dtype: float64                   # float64 for relaxations (fast on P100, slow on T4); float32 = quick
   miller_index: [0, 0, 1]               # (0001) basal plane in hexagonal setting
   min_slab_size: 10.0                   # Angstrom
   min_vacuum_size: 15.0                 # Angstrom
@@ -55,7 +56,7 @@ phase3:
   backend: surrogate                   # chemprop | surrogate (heuristic, wiring test only)
   chemprop:
     executable: chemprop
-    model_path: models/solvation_dG.ckpt   # 2-component model: (solvent, solute) -> dG_solv [kcal/mol]
+    model_path: models/chemprop_solvation  # dir/.pt/.ckpt; 2-component (solvent, solute) -> dG_solv [kcal/mol]
     output_units: kcal/mol
   # Species that leaves the lattice when an O is pulled out. It is the solute
   # whose solvation free energy in the candidate solvent is predicted.

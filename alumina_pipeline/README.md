@@ -80,7 +80,7 @@ pip install -r requirements.txt && pip install -e . && python -m alumina_pipelin
 | Asset | Where | How |
 |---|---|---|
 | REINVENT prior | `priors/reinvent.prior` | Download from the REINVENT 4 Zenodo record linked in the REINVENT4 README |
-| Chemprop solvation model | `models/solvation_dG.ckpt` | Train a **2-component** (solvent, solute) → ΔG_solv model. Example: `chemprop train --data-path combisolv.csv --smiles-columns solvent solute --target-columns dG --task-type regression -o models/`. Use CombiSolv / MNSol / FreeSolv data, and add IL/DES data if you have it |
+| Chemprop solvation model | `models/chemprop_solvation/` | Train a **2-component** (solvent, solute) → ΔG_solv model. Example: `chemprop train --data-path combisolv.csv --smiles-columns solvent solute --target-columns dG --task-type regression -o models/chemprop_solvation`. Use CombiSolv / MNSol / FreeSolv data, and add IL/DES data if you have it |
 | MP API key | `.env` | https://next-gen.materialsproject.org/api |
 
 ## Scientific caveats (read before trusting a "success")

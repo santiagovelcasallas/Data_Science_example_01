@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 import numpy as np
 from ase import Atoms
@@ -85,12 +86,12 @@ def load_bulk(cfg: dict) -> tuple[Atoms, str]:
     return atoms, "builtin:corundum_R-3c"
 
 
-def get_calculator(name: str, device: str, mace_model: str = "medium"):
+def get_calculator(name: str, device: str, mace_model: str = "medium", dtype: str = "float64"):
     name = name.lower()
     if name == "mace":
         from mace.calculators import mace_mp
 
-        return mace_mp(model=mace_model, device=device, default_dtype="float64")
+        return mace_mp(model=mace_model, device=device, default_dtype=dtype)
     if name == "chgnet":
         from chgnet.model.dynamics import CHGNetCalculator
 
@@ -173,10 +174,15 @@ def compute_target(cfg: dict, device: str = "auto", force: bool = False) -> Targ
 
         log.info("Phase 1 is static -> reusing cached target %s", cache)
         with open(cache) as fh:
-            return TargetResult(**json.load(fh))
+            res = TargetResult(**json.load(fh))
+        # The cache may come from another machine (e.g. a previous Kaggle notebook).
+        if not Path(res.slab_file).exists():
+            res.slab_file = str(resolve("data/al2o3_slab.extxyz"))
+        return res
 
     device = pick_device(device)
-    calc = get_calculator(cfg["calculator"], device, cfg.get("mace_model", "medium"))
+    calc = get_calculator(cfg["calculator"], device, cfg.get("mace_model", "medium"),
+                          cfg.get("mace_dtype", "float64"))
 
     # 1. Bulk ------------------------------------------------------------------
     bulk, source = load_bulk(cfg)
